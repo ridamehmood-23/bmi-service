@@ -1,0 +1,85 @@
+name: Deploy to Staging
+
+# Trigger: ONLY a merge (push) into main. Nothing manual, nothing from a PR branch.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: staging
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    name: Build image and deploy to staging
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: http://localhost:3001
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Re-run tests before deploying
+        run: npm test
+
+      - name: Build staging image
+        run: docker build -t bmi-service:staging .
+
+      - name: Start staging container
+        run: |
+          docker rm -f bmi-service-staging 2>/dev/null || true
+          docker run -d --name bmi-service-staging \
+            -e NODE_ENV=staging -p 3001:3000 bmi-service:staging
+
+      - name: Wait for container to become healthy
+        run: |
+          for i in $(seq 1 15); do
+            if curl -fs http://localhost:3001/health > /dev/null; then
+              echo "Staging is up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Staging never became healthy"
+          docker logs bmi-service-staging
+          exit 1
+
+      - name: Smoke test the deployed feature
+        run: |
+          echo "--- GET /health ---"
+          curl -fs http://localhost:3001/health
+          echo ""
+          echo "--- POST /api/bmi (valid) ---"
+          curl -fs -X POST http://localhost:3001/api/bmi \
+            -H 'Content-Type: application/json' \
+            -d '{"weightKg":70,"heightCm":175}' | tee /tmp/ok.json
+          grep -q '"bmi":22.9' /tmp/ok.json
+          echo ""
+          echo "--- POST /api/bmi (invalid, expect 400) ---"
+          code=$(curl -s -o /tmp/bad.json -w '%{http_code}' -X POST http://localhost:3001/api/bmi \
+            -H 'Content-Type: application/json' -d '{"weightKg":70,"heightCm":0}')
+          cat /tmp/bad.json
+          test "$code" = "400"
+
+      - name: Tear down (runner is ephemeral)
+        if: always()
+        run: docker rm -f bmi-service-staging || true
+
+      - name: Staging deploy summary
+        run: |
+          echo "### Staging deploy successful :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`bmi-service:staging\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Endpoint verified: \`POST /api/bmi\` -> 200, invalid input -> 400" >> $GITHUB_STEP_SUMMARY

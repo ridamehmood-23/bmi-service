@@ -1,0 +1,56 @@
+name: Deploy to Production (manual gate)
+
+# Deliberately NOT triggered by push. Production can only be released by a
+# human choosing a commit that has already been verified in staging.
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: 'Commit SHA that has already been verified in staging'
+        required: true
+      confirm:
+        description: 'Type RELEASE to confirm'
+        required: true
+        default: 'no'
+
+jobs:
+  guard:
+    name: Verify release input
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require explicit confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "RELEASE" ]; then
+            echo "Confirmation string missing. Aborting."
+            exit 1
+          fi
+
+  deploy-production:
+    name: Release to production
+    needs: guard
+    runs-on: ubuntu-latest
+    # 'production' is a protected environment with required reviewers,
+    # so this job pauses here until a human approves it in the Actions UI.
+    environment:
+      name: production
+      url: https://example.com
+
+    steps:
+      - name: Checkout the exact staged commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_sha }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Final test gate
+        run: npm test
+
+      - name: Build production image
+        run: docker build -t bmi-service:prod-${{ github.event.inputs.release_sha }} .
+
+      - name: Release
+        run: |
+          echo "Releasing bmi-service:prod-${{ github.event.inputs.release_sha }}"
+          echo "### Production release approved and shipped" >> $GITHUB_STEP_SUMMARY
